@@ -5,6 +5,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cstdlib>
+#include <fstream>
 #include <array>
 #include <bit>
 #include <limits>
@@ -12,6 +14,7 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
+#include <fmt/format.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -436,6 +439,58 @@ bool MemoryAllocator::CreateBufferInSeparatePool(const VkBufferCreateInfo& ci, M
            VK_SUCCESS;
 }
 
+namespace {
+void ReportBufferFailure(const Device& device, VmaAllocator allocator, VkResult result,
+                         const VkBufferCreateInfo& ci, MemoryUsage usage) {
+    const std::string line = fmt::format("Buffer allocation failed: result={} size={:#x} usage={:#x} "
+                                         "memory_usage={}",
+                                         static_cast<int>(result), ci.size, ci.usage,
+                                         static_cast<int>(usage));
+    std::string heaps;
+    {
+        const VkPhysicalDeviceMemoryProperties* properties{};
+        vmaGetMemoryProperties(allocator, &properties);
+        std::array<VmaBudget, VK_MAX_MEMORY_HEAPS> budgets{};
+        vmaGetHeapBudgets(allocator, budgets.data());
+        for (u32 i = 0; i < properties->memoryHeapCount; ++i) {
+            heaps += fmt::format(" heap{}(size={} MiB flags={:#x}): usage={} MiB budget={} MiB "
+                                 "blocks={} MiB allocs={} MiB block_count={} alloc_count={};",
+                                 i, properties->memoryHeaps[i].size >> 20,
+                                 properties->memoryHeaps[i].flags, budgets[i].usage >> 20,
+                                 budgets[i].budget >> 20, budgets[i].statistics.blockBytes >> 20,
+                                 budgets[i].statistics.allocationBytes >> 20, budgets[i].statistics.blockCount,
+                                 budgets[i].statistics.allocationCount);
+        }
+    }
+    {
+        // Ask the driver directly, one memory type at a time, to tell a full heap from a
+        // device-wide refusal.
+        const auto& props = device.GetPhysical().GetMemoryProperties().memoryProperties;
+        const auto& dld = device.GetDispatchLoader();
+        for (u32 t = 0; t < props.memoryTypeCount; ++t) {
+            const VkMemoryAllocateInfo ai{
+                .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                .pNext = nullptr,
+                .allocationSize = ci.size,
+                .memoryTypeIndex = t,
+            };
+            VkDeviceMemory memory{};
+            const VkResult r = dld.vkAllocateMemory(*device.GetLogical(), &ai, nullptr, &memory);
+            heaps += fmt::format(" type{}(heap{} flags={:#x})={};", t, props.memoryTypes[t].heapIndex,
+                                 props.memoryTypes[t].propertyFlags, static_cast<int>(r));
+            if (r == VK_SUCCESS) {
+                dld.vkFreeMemory(*device.GetLogical(), memory, nullptr);
+            }
+        }
+    }
+    LOG_CRITICAL(Render_Vulkan, "{}{}", line, heaps);
+    if (const char* trace = std::getenv("EDEN_NX2_PIPELINE_TRACE")) {
+        std::ofstream file{trace, std::ios::app};
+        file << line << heaps << std::endl;
+    }
+}
+} // Anonymous namespace
+
 vk::Buffer MemoryAllocator::CreateBuffer(const VkBufferCreateInfo &ci, MemoryUsage usage) const {
     // MESA will do memcpy() if not marked as host cached, so just force mark it for most buffers
     auto const anv_flags = (usage == MemoryUsage::Stream
@@ -458,7 +513,23 @@ vk::Buffer MemoryAllocator::CreateBuffer(const VkBufferCreateInfo &ci, MemoryUsa
     VkMemoryPropertyFlags property_flags{};
 
     if (!CreateBufferInSeparatePool(ci, usage, alloc_ci, handle, allocation, alloc_info)) {
-        vk::Check(vmaCreateBuffer(allocator, &ci, &alloc_ci, &handle, &allocation, &alloc_info));
+        VkResult result = vmaCreateBuffer(allocator, &ci, &alloc_ci, &handle, &allocation, &alloc_info);
+        if (result != VK_SUCCESS && (alloc_ci.flags & VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT) != 0) {
+            // Over budget: let the driver over-commit instead of failing the whole frame.
+            VmaAllocationCreateInfo relaxed_ci = alloc_ci;
+            relaxed_ci.flags &= ~VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
+            result = vmaCreateBuffer(allocator, &ci, &relaxed_ci, &handle, &allocation, &alloc_info);
+            if (result != VK_SUCCESS) {
+                // Video memory is full: accept any memory type, host RAM included.
+                relaxed_ci.memoryTypeBits = 0;
+                result = vmaCreateBuffer(allocator, &ci, &relaxed_ci, &handle, &allocation,
+                                         &alloc_info);
+            }
+        }
+        if (result != VK_SUCCESS) {
+            ReportBufferFailure(device, allocator, result, ci, usage);
+        }
+        vk::Check(result);
     }
     vmaGetAllocationMemoryProperties(allocator, allocation, &property_flags);
 
@@ -515,8 +586,25 @@ vk::Buffer MemoryAllocator::CreateBuffer(const VkBufferCreateInfo &ci, MemoryUsa
     VmaAllocation allocation{};
     VkMemoryPropertyFlags property_flags{};
 
-    vk::Check(vmaCreateBufferWithAlignment(allocator, &ci, &alloc_ci, min_alignment, &handle,
-                                           &allocation, &alloc_info));
+    VkResult result = vmaCreateBufferWithAlignment(allocator, &ci, &alloc_ci, min_alignment,
+                                                   &handle, &allocation, &alloc_info);
+    if (result != VK_SUCCESS && (alloc_ci.flags & VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT) != 0) {
+        // Over budget: let the driver over-commit instead of failing the whole frame.
+        VmaAllocationCreateInfo relaxed_ci = alloc_ci;
+        relaxed_ci.flags &= ~VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
+        result = vmaCreateBufferWithAlignment(allocator, &ci, &relaxed_ci, min_alignment, &handle,
+                                              &allocation, &alloc_info);
+        if (result != VK_SUCCESS) {
+            // Video memory is full: accept any memory type, host RAM included.
+            relaxed_ci.memoryTypeBits = 0;
+            result = vmaCreateBufferWithAlignment(allocator, &ci, &relaxed_ci, min_alignment,
+                                                  &handle, &allocation, &alloc_info);
+        }
+    }
+    if (result != VK_SUCCESS) {
+        ReportBufferFailure(device, allocator, result, ci, usage);
+    }
+    vk::Check(result);
     vmaGetAllocationMemoryProperties(allocator, allocation, &property_flags);
 
     u8 *data = reinterpret_cast<u8 *>(alloc_info.pMappedData);

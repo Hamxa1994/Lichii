@@ -20,6 +20,7 @@
 #include "common/settings.h"
 #include "core/core_timing.h"
 #include "core/frontend/graphics_context.h"
+#include "common/frame_gen_stats.h"
 #include "video_core/capture.h"
 #include "video_core/gpu.h"
 #include "video_core/nx2_profile.h"
@@ -211,6 +212,38 @@ try
     throw std::runtime_error{fmt::format("Vulkan initialization error {}", exception.what())};
 }
 
+#ifdef HAS_LSFG
+namespace {
+
+/// Once a second while frame generation is on: how many frames the game rendered and how many
+/// were generated, as rates over that second.
+void LogFrameGenRates() {
+    if (!Settings::values.frame_gen.GetValue()) {
+        return;
+    }
+    static auto last_time = std::chrono::steady_clock::now();
+    static Common::FrameGenStats::Totals last_totals = Common::FrameGenStats::Get();
+
+    const auto now = std::chrono::steady_clock::now();
+    const double seconds = std::chrono::duration<double>(now - last_time).count();
+    if (seconds < 1.0) {
+        return;
+    }
+    const auto totals = Common::FrameGenStats::Get();
+    const double original = static_cast<double>(totals.original - last_totals.original) / seconds;
+    const double generated =
+        static_cast<double>(totals.generated - last_totals.generated) / seconds;
+    LOG_INFO(Render_Vulkan,
+             "Frame generation: {:.1f} original + {:.1f} generated = {:.1f} presented frames/s "
+             "({:.2f} generated per original)",
+             original, generated, original + generated, original > 0.0 ? generated / original : 0.0);
+    last_time = now;
+    last_totals = totals;
+}
+
+} // Anonymous namespace
+#endif
+
 RendererVulkan::~RendererVulkan() {
     scheduler.RegisterOnSubmit([] {});
     void(device.GetLogical().WaitIdle());
@@ -263,6 +296,8 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
         scheduler.Flush(*generated->render_ready);
         present_manager.Present(generated);
     }
+    Common::FrameGenStats::Record(generated_frames);
+    LogFrameGenRates();
 #endif
 
     if (trace) {

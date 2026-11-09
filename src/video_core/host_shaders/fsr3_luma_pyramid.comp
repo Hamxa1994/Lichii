@@ -1,0 +1,30 @@
+#version 460 core
+
+// One level of the luma pyramid used by the optical flow. The destination is half the size of the
+// source (rounded up), so sampling the source bilinearly at the destination pixel centre averages
+// a 2x2 block. Level 0 reads the colour frame and converts it to luma; the coarser levels read the
+// luma of the level above.
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(binding = 0) uniform sampler2D Source;
+layout(binding = 1, rgba16f) uniform writeonly image2D Destination;
+
+layout(push_constant) uniform PushConstants {
+    vec2 inv_dest_size;
+    vec2 dest_size;
+    float from_color; // 1.0 when Source is the colour frame
+    float reserved;
+};
+
+void main() {
+    ivec2 pixel_coord = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel_coord.x >= int(dest_size.x) || pixel_coord.y >= int(dest_size.y)) {
+        return;
+    }
+
+    vec2 uv = (vec2(pixel_coord) + 0.5) * inv_dest_size;
+    vec4 value = texture(Source, uv);
+    float luma = from_color > 0.5 ? dot(value.rgb, vec3(0.299, 0.587, 0.114)) : value.r;
+    imageStore(Destination, pixel_coord, vec4(luma, 0.0, 0.0, 0.0));
+}

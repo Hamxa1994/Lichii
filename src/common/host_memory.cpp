@@ -6,7 +6,10 @@
 
 #ifdef _WIN32
 
+#include <cstdlib>
 #include <iterator>
+#include <mutex>
+#include <vector>
 #include "common/container/unordered_map.h"
 #include <boost/icl/separate_interval_set.hpp>
 #include <windows.h>
@@ -161,13 +164,19 @@ public:
             return false;
         }
 
+        // Reserve the backing and commit it in chunks as it is mapped or touched, instead of
+        // charging all of it against the system commit limit at creation.
+        // EDEN_NX2_LAZY_COMMIT=0 restores the eager commit.
+        const char* const lazy_env = std::getenv("EDEN_NX2_LAZY_COMMIT");
+        lazy_commit = lazy_env == nullptr || lazy_env[0] != '0';
+
         // Allocate backing file map. SEC_COMMIT charges all of it to the commit limit up front, and
         // when the free commit is only just above its size the call fails with
         // ERROR_NO_SYSTEM_RESOURCES without growing a system-managed page file. The emulator then
         // runs the whole session without fastmem (Ocarina of Time: 20-25% fewer fps). A private
         // commit of the same size does grow the page file, so make one, release it and try again.
         for (int attempt = 1; attempt <= BackingAttempts && !backing_handle; ++attempt) {
-            backing_handle = pfn_CreateFileMapping2(INVALID_HANDLE_VALUE, nullptr, FILE_MAP_WRITE | FILE_MAP_READ, PAGE_READWRITE, SEC_COMMIT, backing_size, nullptr, nullptr, 0);
+            backing_handle = pfn_CreateFileMapping2(INVALID_HANDLE_VALUE, nullptr, FILE_MAP_WRITE | FILE_MAP_READ, PAGE_READWRITE, lazy_commit ? SEC_RESERVE : SEC_COMMIT, backing_size, nullptr, nullptr, 0);
             if (backing_handle) {
                 if (attempt > 1) {
                     LOG_INFO(HW_Memory, "Allocated {} MiB of backing memory on attempt {}", backing_size >> 20, attempt);
@@ -212,6 +221,12 @@ public:
             LOG_CRITICAL(HW_Memory, "Failed to reserve {} GiB of virtual memory", virtual_size >> 30);
             return false;
         }
+        if (lazy_commit) {
+            chunk_committed.assign((backing_size + CommitChunkSize - 1) / CommitChunkSize, 0);
+            RegisterLazyBacking();
+            LOG_INFO(HW_Memory, "Lazy commit: {} MiB of backing reserved, committed on demand",
+                     backing_size >> 20);
+        }
         return true;
     }
 
@@ -241,6 +256,9 @@ public:
         ASSERT(placeholders.find({virtual_offset, virtual_offset + length}) == placeholders.end());
         TrackPlaceholder(virtual_offset, host_offset, length);
 
+        if (lazy_commit) {
+            EnsureCommitted(host_offset, length);
+        }
         MapView(virtual_offset, host_offset, length);
     }
 
@@ -304,8 +322,129 @@ public:
     u8* virtual_base{};
 
 private:
+    static constexpr size_t CommitChunkSize = 2 * 1024 * 1024;
+
+    static inline std::mutex lazy_registry_mutex;
+    static inline std::vector<Impl*> lazy_registry;
+    static inline PVOID lazy_handler_handle{};
+
+    /// Commit the backing chunks covering [host_offset, host_offset + length).
+    /// Returns -1 on failure, 0 when everything was already committed, 1 when a chunk was added.
+    int EnsureCommitted(size_t host_offset, size_t length) {
+        if (!lazy_commit || length == 0 || host_offset >= backing_size) {
+            return 0;
+        }
+        const size_t end = (std::min)(host_offset + length, backing_size);
+        std::scoped_lock lock{commit_mutex};
+        int result = 0;
+        for (size_t chunk = host_offset / CommitChunkSize; chunk * CommitChunkSize < end; ++chunk) {
+            if (chunk_committed[chunk]) {
+                continue;
+            }
+            const size_t offset = chunk * CommitChunkSize;
+            const size_t size = (std::min)(CommitChunkSize, backing_size - offset);
+            if (!VirtualAlloc(backing_base + offset, size, MEM_COMMIT, PAGE_READWRITE)) {
+                LOG_CRITICAL(HW_Memory, "Lazy commit of {:#x}+{:#x} failed, error {}", offset, size,
+                             GetLastError());
+                return -1;
+            }
+            chunk_committed[chunk] = 1;
+            const size_t previous = committed_bytes;
+            committed_bytes += size;
+            result = 1;
+            if ((previous >> 30) != (committed_bytes >> 30)) {
+                LOG_INFO(HW_Memory, "Lazy commit: {} MiB of {} MiB backing committed",
+                         committed_bytes >> 20, backing_size >> 20);
+            }
+        }
+        return result;
+    }
+
+    /// Commit the chunk behind a faulting address. Returns true when the access can be retried.
+    bool HandleFault(uintptr_t address) {
+        if (!lazy_commit) {
+            return false;
+        }
+        size_t host_offset;
+        const uintptr_t backing = reinterpret_cast<uintptr_t>(backing_base);
+        const uintptr_t virt = reinterpret_cast<uintptr_t>(virtual_base);
+        if (backing_base && address >= backing && address < backing + backing_size) {
+            host_offset = address - backing;
+        } else if (virtual_base && address >= virt && address < virt + virtual_size) {
+            const size_t virtual_offset = address - virt;
+            std::scoped_lock lock{placeholder_mutex};
+            const auto it = placeholders.find({virtual_offset, virtual_offset + 1});
+            if (it == placeholders.end()) {
+                return false;
+            }
+            const auto host_it = placeholder_host_pointers.find(it->lower());
+            if (host_it == placeholder_host_pointers.end()) {
+                return false;
+            }
+            host_offset = host_it->second + (virtual_offset - it->lower());
+        } else {
+            return false;
+        }
+        const int result = EnsureCommitted(host_offset, 1);
+        if (result < 0) {
+            return false;
+        }
+        // Another thread may have committed the chunk between our fault and now: allow one retry
+        // per address before treating the fault as genuine, so a real fault cannot loop.
+        thread_local uintptr_t last_retry_address{};
+        if (result == 1) {
+            last_retry_address = 0;
+            return true;
+        }
+        if (last_retry_address == address) {
+            last_retry_address = 0;
+            return false;
+        }
+        last_retry_address = address;
+        return true;
+    }
+
+    static LONG CALLBACK LazyCommitHandler(PEXCEPTION_POINTERS info) {
+        const DWORD code = info->ExceptionRecord->ExceptionCode;
+        if ((code != EXCEPTION_ACCESS_VIOLATION && code != EXCEPTION_IN_PAGE_ERROR) ||
+            info->ExceptionRecord->NumberParameters < 2) {
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+        const uintptr_t address = static_cast<uintptr_t>(info->ExceptionRecord->ExceptionInformation[1]);
+        std::scoped_lock lock{lazy_registry_mutex};
+        for (Impl* const impl : lazy_registry) {
+            if (impl->HandleFault(address)) {
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
+        }
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+
+    void RegisterLazyBacking() {
+        std::scoped_lock lock{lazy_registry_mutex};
+        if (lazy_registry.empty()) {
+            lazy_handler_handle = AddVectoredExceptionHandler(1, LazyCommitHandler);
+        }
+        lazy_registry.push_back(this);
+    }
+
+    void UnregisterLazyBacking() {
+        std::scoped_lock lock{lazy_registry_mutex};
+        std::erase(lazy_registry, this);
+        if (lazy_registry.empty() && lazy_handler_handle) {
+            RemoveVectoredExceptionHandler(lazy_handler_handle);
+            lazy_handler_handle = nullptr;
+        }
+    }
+
     /// Release all resources in the object
     void Release() {
+        if (lazy_commit) {
+            UnregisterLazyBacking();
+            LOG_INFO(HW_Memory, "Lazy commit: {} MiB of {} MiB backing was committed",
+                     committed_bytes >> 20, backing_size >> 20);
+            lazy_commit = false;
+        }
         if (!placeholders.empty()) {
             for (const auto& placeholder : placeholders) {
                 if (!pfn_UnmapViewOfFile2(process, virtual_base + placeholder.lower(),
@@ -455,6 +594,11 @@ private:
 
     HANDLE process{};        ///< Current process handle
     HANDLE backing_handle{}; ///< File based backing memory
+
+    bool lazy_commit{};
+    std::mutex commit_mutex;
+    std::vector<u8> chunk_committed;
+    size_t committed_bytes{};
 
     DynamicLibrary kernelbase_dll;
     PFN_CreateFileMapping2 pfn_CreateFileMapping2{};

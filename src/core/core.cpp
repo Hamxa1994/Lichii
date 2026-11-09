@@ -4,8 +4,10 @@
 #include <array>
 #include <cstdlib>
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <new>
+#include <thread>
 #include <utility>
 
 #include "game_settings.h"
@@ -241,7 +243,21 @@ struct System::Impl {
             return;
         }
 
-        LOG_DEBUG(Kernel, "Re-initializing");
+        LOG_INFO(Core,
+                 "Re-initializing the system: device memory present={}, multicore {}->{}, memory "
+                 "layout {}->{}, on thread {}",
+                 device_memory.has_value(), is_multicore,
+                 Settings::values.use_multi_core.GetValue(), static_cast<int>(memory_layout),
+                 static_cast<int>(Settings::values.memory_layout_mode.GetValue()),
+                 std::hash<std::thread::id>{}(std::this_thread::get_id()));
+
+        // Initialize() below replaces device_memory, and the renderer both owns the Vulkan device
+        // and holds a reference to that memory. Release the GPU first so the old device is fully
+        // gone before a new one is created (the AMD driver aborts the process when two are alive)
+        // and so nothing outlives the device memory it points at. Host1x goes with it: it owns the
+        // device memory manager the renderer reads through.
+        gpu_core.reset();
+        host1x_core.reset();
 
         is_multicore = Settings::values.use_multi_core.GetValue();
         memory_layout = Settings::values.memory_layout_mode.GetValue();

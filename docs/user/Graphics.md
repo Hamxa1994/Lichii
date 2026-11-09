@@ -79,6 +79,21 @@ While stock shaders offer a basic subset of options for most users, programs suc
 8. Hit the edit button and select "active at startup" for the shader to be turned off on every game launch.
 9. Caps lock to manually turn on and off the shader (default key you can change it with the previous edit button) 
 
+### Frame generation
+
+Frame generation presents extra frames between the ones the game renders. It is under
+Graphics, Enable Frame Generation, and its options appear when that box is ticked.
+
+- **Lossless Scaling (LSFG)** needs `Lossless.dll` from your own copy of Lossless Scaling in the
+  `lossless` folder of the data directory, and a GPU that exposes float16 (RDNA and newer on AMD).
+- **FSR3** is a built-in optical flow interpolation that runs on any Vulkan GPU. It is not AMD's
+  FSR 3 frame generation, which needs the game's depth and motion vectors. A three-level pyramid
+  finds large motions cheaply, and where the match is poor (occlusions, scene cuts) it shows the
+  nearer real frame instead of a blend. If LSFG cannot run on the GPU, this one is used.
+
+The status bar shows `Frame Gen: <original> + <generated> = <total>` frames per second, and the
+log has a `Frame generation:` line once a second with the same numbers.
+
 ## Driver specifics
 
 ### Mesa environment variable hacks

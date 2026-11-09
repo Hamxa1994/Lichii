@@ -1,0 +1,56 @@
+#version 460 core
+
+// Component-wise 3x3 median of the finest optical flow level (removes outlier vectors). It runs
+// once per real frame, so the frames generated from that flow read one filtered texel instead of
+// sorting nine vectors per pixel each time.
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(binding = 0) uniform sampler2D Flow;
+layout(binding = 1, rgba16f) uniform writeonly image2D Filtered;
+
+layout(push_constant) uniform PushConstants {
+    vec2 inv_dest_size;
+    vec2 dest_size;
+    float reserved0;
+    float reserved1;
+};
+
+void sort9(inout float a[9]) {
+    for (int i = 1; i < 9; i++) {
+        float key = a[i];
+        int j = i - 1;
+        while (j >= 0 && a[j] > key) {
+            a[j + 1] = a[j];
+            j--;
+        }
+        a[j + 1] = key;
+    }
+}
+
+void main() {
+    ivec2 pixel_coord = ivec2(gl_GlobalInvocationID.xy);
+    if (pixel_coord.x >= int(dest_size.x) || pixel_coord.y >= int(dest_size.y)) {
+        return;
+    }
+
+    ivec2 size = ivec2(dest_size);
+    float xs[9];
+    float ys[9];
+    int n = 0;
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            ivec2 c = clamp(pixel_coord + ivec2(dx, dy), ivec2(0), size - 1);
+            vec2 v = texelFetch(Flow, c, 0).xy;
+            xs[n] = v.x;
+            ys[n] = v.y;
+            ++n;
+        }
+    }
+    sort9(xs);
+    sort9(ys);
+
+    // The matching cost and the zero-motion cost stay those of the pixel itself.
+    vec4 center = texelFetch(Flow, pixel_coord, 0);
+    imageStore(Filtered, pixel_coord, vec4(xs[4], ys[4], center.z, center.w));
+}

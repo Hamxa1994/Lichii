@@ -1267,10 +1267,23 @@ void BlitScale(Scheduler& scheduler, VkImage src_image, VkImage dst_image, const
 // Uncompressed ASTC needs more video memory than a Switch 2 title leaves under a 12 GiB budget
 // (Mario Kart World filled a 16 GB card's 13.5 GB budget; a 12 GB card has ~11.2 GB): there the
 // textures went unbacked (garbage) and the game crashed. Use BC3 for this session.
+//
+// BC1 is the other case worth correcting. It stores 4x4 blocks of 5:6:5 colour with no alpha, so
+// ASTC textures re-compressed to it draw as the square 4x4 blocks such a setup reports, and the
+// setting exists to save memory rather than for how it looks. On a card whose budget is already
+// why the re-compression is on, BC3 is the closer match to the guest texture and is still half of
+// RGBA8, so upgrade to it. Natively sampled ASTC stays untouched: only BC1 is replaced there.
 void UseBc3ForSwitch2OnSmallCards(const Device& device) {
     using namespace Common::Literals;
-    if (!Settings::CurrentProgramIsSwitch2() || device.IsOptimalAstcSupported() ||
-        Settings::GetAstcRecompression() != Settings::AstcRecompression::Uncompressed) {
+    if (!Settings::CurrentProgramIsSwitch2()) {
+        return;
+    }
+    const auto recompression = Settings::GetAstcRecompression();
+    if (recompression == Settings::AstcRecompression::Bc3) {
+        return;
+    }
+    if (recompression == Settings::AstcRecompression::Uncompressed &&
+        device.IsOptimalAstcSupported()) {
         return;
     }
     const u64 budget = device.GetDeviceMemoryBudget();
@@ -1281,9 +1294,12 @@ void UseBc3ForSwitch2OnSmallCards(const Device& device) {
     }
     LOG_WARNING(Render_Vulkan,
                 "Switch 2 program with a {} MiB video memory budget: ASTC textures are "
-                "re-compressed to BC3 for this session (uncompressed ASTC needs a 20 GiB budget). "
-                "Set EDEN_NX2_KEEP_ASTC=1 to keep them uncompressed",
-                memory >> 20);
+                "re-compressed to BC3 for this session ({} needs a 20 GiB budget for uncompressed "
+                "ASTC, and BC1 draws them as square blocks). "
+                "Set EDEN_NX2_KEEP_ASTC=1 to keep the configured mode",
+                memory >> 20,
+                recompression == Settings::AstcRecompression::Uncompressed ? "uncompressed ASTC"
+                                                                          : "BC1");
     Settings::SetAstcRecompressionOverride(Settings::AstcRecompression::Bc3);
 }
 } // Anonymous namespace

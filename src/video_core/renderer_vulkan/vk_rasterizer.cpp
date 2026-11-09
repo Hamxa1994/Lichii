@@ -843,6 +843,13 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
         }
         return;
     }
+    // A pipeline that was never built drops its draws at the end of Configure, after the buffer,
+    // texture and render target work for the draw. Drop it first: about 27% of one scene's draws.
+    if (pipeline->IsUnbuildable()) {
+        report_failure("configure failed");
+        TraceRenderState(is_indexed, "configure-failed", nullptr);
+        return;
+    }
     if (VideoCommon::OotNetwork::BypassEnabled(Settings::GetCurrentProgramID())) {
         TrackOotTonemappedImage(*pipeline);
     }

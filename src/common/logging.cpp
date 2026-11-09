@@ -449,6 +449,17 @@ void Stop() {
         logging_instance->ForEachBackend([](Backend& backend) { backend.Flush(); });
 }
 
+void FlushFileBackend() noexcept {
+    // Deliberately does not go through ForEachBackend: the console backend can block on a crashed
+    // console, and the file backend is the only one worth preserving from a crash handler.
+    try {
+        if (logging_instance && logging_instance->file_backend)
+            logging_instance->file_backend->Flush();
+    } catch (...) {
+        // A crash handler must never throw.
+    }
+}
+
 void SetGlobalFilter(const Filter& filter) {
     if (logging_instance)
         logging_instance->filter = filter;

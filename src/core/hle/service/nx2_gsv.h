@@ -3124,7 +3124,14 @@ private:
                 if (fence) {
                     WaitForRelease(*fence);
                 }
-                const auto [width, height] = WriteImage(decoder.get(), image, frame, bytes);
+                std::pair<u32, u32> size{m_width, m_height};
+                try {
+                    size = WriteImage(decoder.get(), image, frame, bytes);
+                } catch (const std::exception& e) {
+                    LOG_ERROR(Service, "{} writing decoded image {} failed: {}", GetServiceName(),
+                              image, e.what());
+                }
+                const auto [width, height] = size;
                 lk.lock();
                 // Even an image written during a flush counts: the client waits for its value.
                 m_outputs.push_back({image, width, height, frame.pts, frame.end});
@@ -3186,9 +3193,14 @@ private:
             }
             pictures.clear();
             const auto decode_start = std::chrono::steady_clock::now();
-            decoder->Decode(input.data, input.pts, pictures);
-            if (input.end) {
-                decoder->Drain(pictures);
+            try {
+                decoder->Decode(input.data, input.pts, pictures);
+                if (input.end) {
+                    decoder->Drain(pictures);
+                }
+            } catch (const std::exception& e) {
+                LOG_ERROR(Service, "{} decode failed: {}", GetServiceName(), e.what());
+                pictures.clear();
             }
             const auto decode_us = std::chrono::duration_cast<std::chrono::microseconds>(
                                        std::chrono::steady_clock::now() - decode_start)
@@ -3286,7 +3298,16 @@ private:
             block_linear = image->second.gpu_read &&
                            layout.format != Tegra::Host1x::Nx2PictureFormat::Nv12;
             const auto memory = m_objects->memories.find(image->second.memory);
-            if (memory != m_objects->memories.end() && memory->second.address != 0) {
+            constexpr u64 MaxImageSize = u64{256} << 20;
+            const bool fits = layout.size <= MaxImageSize &&
+                              (memory == m_objects->memories.end() || memory->second.size == 0 ||
+                               image->second.offset + layout.size <= memory->second.size);
+            if (!fits) {
+                LOG_WARNING(Service,
+                            "nx2:vdec image {} layout {:#x} bytes at {:#x} exceeds its memory, "
+                            "frame dropped",
+                            image_id, layout.size, image->second.offset);
+            } else if (memory != m_objects->memories.end() && memory->second.address != 0) {
                 address = memory->second.address + image->second.offset;
                 parent = memory->second.parent;
                 parent_offset = memory->second.parent_offset + image->second.offset;

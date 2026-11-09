@@ -141,6 +141,11 @@ void Start();
 /// Explicitly stops the logger thread and flushes the buffers
 void Stop();
 
+/// Flushes the log file backend only. Safe to call from a crash handler: it takes no logging
+/// mutex, so a thread that died mid-write cannot deadlock it, and it keeps the tail of the
+/// log that would otherwise be lost with the unflushed buffer. Best effort by design.
+void FlushFileBackend() noexcept;
+
 /// The global filter will prevent any messages from even being processed if they are filtered.
 void SetGlobalFilter(const Filter& filter);
 void SetColorConsoleBackendEnabled(bool enabled);

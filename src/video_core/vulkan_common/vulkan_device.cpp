@@ -450,6 +450,55 @@ VKAPI_ATTR void VKAPI_CALL TimedFreeMemory(VkDevice device, VkDeviceMemory memor
     g_vma_free_memory(device, memory, allocator);
 }
 
+// AMD GCN 4 (Polaris) is what the Radeon RX 470/480/570/580/590 and their mobile and embedded
+// siblings are. Their driver reports shaderFloat16, so the "no float16 means GCN4" probe below
+// never matched them, and the workarounds for the broken VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT and
+// VK_EXT_sampler_filter_minmax were never applied: cube maps and filtered taps then drew as the
+// square blocks those cards are known for. Identify the family by PCI device ID as well.
+[[nodiscard]] bool IsAmdPolarisFamily(u32 device_id) {
+    switch (device_id) {
+    // Polaris 10 (Ellesmere): RX 470/480/570/580, including the 2048SP
+    case 0x67C0:
+    case 0x67C1:
+    case 0x67C2:
+    case 0x67C4:
+    case 0x67C7:
+    case 0x67DF:
+    // Polaris 11 (Baffin): RX 460/560 and mobile variants
+    case 0x67E0:
+    case 0x67E1:
+    case 0x67E3:
+    case 0x67E7:
+    case 0x67E8:
+    case 0x67E9:
+    case 0x67EB:
+    case 0x67EF:
+    // Polaris 12 (Lexa): RX 550 and mobile variants
+    case 0x6980:
+    case 0x6981:
+    case 0x6985:
+    case 0x6986:
+    case 0x6987:
+    case 0x6995:
+    case 0x6997:
+    case 0x699F:
+    // Polaris 20/21/30 rebrands
+    case 0x6FDF:
+    case 0x6FE0:
+    case 0x6FE1:
+    case 0x6FE3:
+    case 0x6FE4:
+    case 0x6FE8:
+    case 0x6FE9:
+    case 0x6FEB:
+    case 0x6FEC:
+    case 0x6FED:
+        return true;
+    default:
+        return false;
+    }
+}
+
 } // Anonymous namespace
 
 void Device::RemoveExtension(bool& extension, const std::string& extension_name) {
@@ -652,7 +701,9 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
     // AMD GCN4 and older are told apart by their lack of float16, read before float16 is turned
     // off for newer AMD drivers below: checked after that, every AMD GPU looked like GCN4 and lost
     // VK_EXT_sampler_filter_minmax (an RDNA3 Radeon 780M logged it).
-    const bool amd_gcn4_or_older = is_amd && !features.shader_float16_int8.shaderFloat16;
+    const bool amd_gcn4_or_older =
+        is_amd && (IsAmdPolarisFamily(properties.properties.deviceID) ||
+                   !features.shader_float16_int8.shaderFloat16);
     if (is_amd_driver) {
         // AMD drivers need a higher amount of Sets per Pool in certain circumstances like in XC2.
         sets_per_pool = 96;
@@ -662,6 +713,20 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
             LOG_WARNING(Render_Vulkan,
                         "AMD GCN4 and earlier have broken VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT");
             has_broken_cube_compatibility = true;
+
+            // The old AMD driver aborts (stack cookie failure) inside vkCreateGraphicsPipelines;
+            // build pipelines one at a time.
+            LOG_WARNING(Render_Vulkan,
+                        "AMD GCN4 and earlier: serializing pipeline compilation");
+            has_broken_parallel_compiling = true;
+            is_amd_gcn4_or_older = true;
+            if (const char* value = std::getenv("EDEN_NX2_GCN4_GEOMETRY");
+                value != nullptr && value[0] != '\0' && value[0] != '0') {
+                allow_amd_gcn4_geometry = true;
+                LOG_WARNING(Render_Vulkan,
+                            "EDEN_NX2_GCN4_GEOMETRY: building geometry pipelines on this GPU, "
+                            "the driver may crash");
+            }
         }
 
         // AMD drivers (2026+) have broken float16 math on DKCR
@@ -2067,7 +2132,7 @@ void Device::CollectPhysicalMemoryInfo() {
         const u64 memory_size = Settings::values.vram_usage_mode.GetValue() == Settings::VramUsageMode::Aggressive ? 6_GiB : 4_GiB;
         device_access_memory = static_cast<u64>(std::max<s64>(std::min<s64>(available_memory - 8_GiB, memory_size), std::min<s64>(local_memory, memory_size)));
     } else {
-        const u64 reserve_memory = std::min<u64>(device_access_memory / 8, 1_GiB);
+        const u64 reserve_memory = std::min<u64>(device_access_memory / 8, 768_MiB);
         device_access_memory -= reserve_memory;
         if (Settings::values.vram_usage_mode.GetValue() != Settings::VramUsageMode::Aggressive) {
             // Account for resolution scaling in memory limits

@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <span>
 #include <vector>
@@ -16,6 +17,7 @@
 #include <boost/container/small_vector.hpp>
 #include <boost/container/static_vector.hpp>
 #include <fmt/format.h>
+#include <fmt/ranges.h>
 
 #include "video_core/renderer_vulkan/pipeline_build_trace.h"
 #include "video_core/renderer_vulkan/pipeline_helper.h"
@@ -617,7 +619,7 @@ GraphicsPipeline::GraphicsPipeline(
                          device.GetMaxTessellationPatchSize());
             throw;
         }
-        if (pipeline_statistics) {
+        if (pipeline_statistics && pipeline) {
             pipeline_statistics->Collect(device, *pipeline);
         }
         // Nothing reads the shader modules once the pipeline exists, and the driver keeps a copy
@@ -1527,6 +1529,13 @@ bool GraphicsPipeline::ConfigureDraw(const RescalingPushConstant& rescaling,
 
 void GraphicsPipeline::MakePipeline(VkRenderPass render_pass) {
     if (IsMeshPipeline() && !device.IsExtMeshShaderSupported() && !mesh_emulation) {
+        return;
+    }
+    if (device.IsAmdGcn4GeometryBlocked() && spv_modules[3]) {
+        // The AMD driver for these GPUs overruns its stack (fast fail) compiling a geometry
+        // stage in vkCreateGraphicsPipelines. Leave the pipeline unbuilt: its draws are skipped.
+        LOG_WARNING(Render_Vulkan,
+                    "Skipping a geometry shader pipeline: the AMD GCN4 driver crashes building it");
         return;
     }
     if (mesh_emulation) {

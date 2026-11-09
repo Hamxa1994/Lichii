@@ -220,12 +220,33 @@ void SinkStream::ProcessAudioOutAndRender(std::span<s16> output_buffer, std::siz
 
             if (!queue.TryPop(playing_buffer)) {
                 lk.unlock();
-                for (size_t i = frames_written; i < num_frames; i++) {
-                    if (type == StreamType::Sysmix) {
-                        std::memset(&output_buffer[i * frame_size], 0, frame_size_bytes);
-                    } else {
-                        std::memcpy(&output_buffer[i * frame_size], last_frame.data(), frame_size_bytes);
+                // Underrun: the queue ran dry, so there is nothing to play. Holding last_frame
+                // across the whole gap (as before) is a DC step repeated at the buffer rate, which
+                // is the buzz/click a hitch sounds like once it outruns the queue. Fade the last
+                // frame out over a short ramp and leave the rest silent instead: same latency, no
+                // step, and the gap no longer sounds like broken audio.
+                const size_t gap = num_frames - frames_written;
+                const size_t fade = (std::min)(gap, static_cast<size_t>(TargetSampleCount / 2));
+                for (size_t i = 0; i < gap; ++i) {
+                    s16* const frame = &output_buffer[(frames_written + i) * frame_size];
+                    if (type == StreamType::Sysmix || i >= fade || fade == 0) {
+                        std::memset(frame, 0, frame_size_bytes);
+                        continue;
                     }
+                    const f32 gain = 1.0f - static_cast<f32>(i) / static_cast<f32>(fade);
+                    for (size_t channel = 0; channel < frame_size; ++channel) {
+                        frame[channel] = static_cast<s16>(static_cast<f32>(last_frame[channel]) * gain);
+                    }
+                }
+                // Starved buffers are the cause of stutter, not a symptom of anything later:
+                // report them so a stutter can be traced to the queue rather than guessed at.
+                static std::atomic<u64> underruns{};
+                const u64 count = underruns.fetch_add(1) + 1;
+                if (count == 1 || count % 200 == 0) {
+                    LOG_WARNING(Audio,
+                                "Audio underrun #{}: the buffer queue ran dry ({} frames of silence "
+                                "in this callback, {} queued)",
+                                count, gap, queued_buffers.load());
                 }
                 frames_written = num_frames;
                 continue;

@@ -266,6 +266,13 @@ public:
         return writes_images;
     }
 
+    /// True once the build finished without producing a Vulkan pipeline (the driver cannot build
+    /// it, or a stage is unsupported). Every draw with it is dropped, so the draw's setup, which
+    /// is most of its cost, can be skipped.
+    [[nodiscard]] bool IsUnbuildable() const noexcept {
+        return build->IsBuilt() && (!pipeline || build->Failed());
+    }
+
     [[nodiscard]] bool IsBuilt() const noexcept {
         return build->IsBuilt();
     }

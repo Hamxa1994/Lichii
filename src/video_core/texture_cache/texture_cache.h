@@ -3068,7 +3068,16 @@ ImageId TextureCache<P>::JoinImages(const ImageInfo& info, GPUVAddr gpu_addr, DA
         // contents rather than downloading them through the replacement mapping.
         if (True(overlap.flags & ImageFlagBits::GpuModified) &&
             False(overlap.flags & ImageFlagBits::Remapped)) {
-            UNIMPLEMENTED();
+                        // The overlap is being replaced because its memory was remapped or the new image
+            // covers the same region, so what the GPU wrote to it is dropped and the new image
+            // is read back from guest memory below.
+            static u32 dropped_logged{};
+            if (dropped_logged++ < 8) {
+                LOG_WARNING(HW_GPU,
+                            "Dropping GPU-modified image {:#x} replaced by {:#x}: {}x{}",
+                            overlap.gpu_addr, new_image.gpu_addr, overlap.info.size.width,
+                            overlap.info.size.height);
+            }
         }
         if (True(overlap.flags & ImageFlagBits::Tracked)) {
             UntrackImage(overlap, overlap_id);

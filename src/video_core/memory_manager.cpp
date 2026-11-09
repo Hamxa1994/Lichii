@@ -352,7 +352,14 @@ void MemoryManager::Write(GPUVAddr addr, T data) {
         return;
     }
 
-    ASSERT(false);
+    // The write is dropped: the address is neither mapped nor a sparse block that could be backed,
+    // so whatever the game put here (texture uploads among it) never lands. Report where, like the
+    // read path above, instead of asserting with no address.
+    static std::atomic<u32> reported{};
+    if (reported.fetch_add(1) < 16) {
+        LOG_ERROR(HW_GPU, "Write{} to unmapped GPU address {:#x}, data {:#x}", sizeof(T) * 8, addr,
+                  static_cast<u64>(data));
+    }
 }
 
 template u8 MemoryManager::Read<u8>(GPUVAddr addr) const;

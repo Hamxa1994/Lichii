@@ -2493,6 +2493,20 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
 
         Shader::IR::Program& program{programs[index]};
         const size_t stage_index{index - 1};
+        if (program.is_geometry_passthrough && device.IsAmdGcn4GeometryBlocked() &&
+            !program.info.stores[Shader::IR::Attribute::Layer] &&
+            !program.info.stores[Shader::IR::Attribute::ViewportIndex]) {
+            // A passthrough geometry shader only forwards its input vertices. The driver of these
+            // GPUs crashes building any geometry stage, so the pipeline would be skipped and its
+            // draws lost; without the stage the vertices go straight to the fragment shader.
+            static std::atomic<bool> logged{};
+            if (!logged.exchange(true)) {
+                LOG_INFO(Render_Vulkan,
+                         "Building passthrough geometry shader pipelines without the geometry stage "
+                         "(the GCN4 driver crashes building it)");
+            }
+            continue;
+        }
         infos[stage_index] = &program.info;
 
         auto runtime_info{MakeRuntimeInfo(programs, key, program, previous_stage, device)};

@@ -8,6 +8,7 @@
 #include "common/fs/file.h"
 #include "common/fs/fs.h"
 #include "common/fs/path_util.h"
+#include "common/logging.h"
 #include "common/settings.h"
 #include "video_core/renderer_vulkan/present/frame_gen.h"
 #include "video_core/renderer_vulkan/present/util.h"
@@ -202,7 +203,7 @@ void FrameGen::Process(const Device& device, Frame* frame, VkFormat format,
         shaders.emplace(device);
     }
 
-    if (unavailable || !Settings::values.frame_gen.GetValue()) {
+    if (!Settings::values.frame_gen.GetValue()) {
         if (chain || fsr3_chain) {
             scheduler.Finish();
             chain.reset();
@@ -212,12 +213,15 @@ void FrameGen::Process(const Device& device, Frame* frame, VkFormat format,
         return;
     }
 
-    if (!shaders->IsValid() && Settings::values.frame_gen_type.GetValue() != Settings::FrameGenType::Fsr3) {
-        unavailable = true;
-        state.store(shaders->IsDeviceSupported() ? VideoCore::FrameGenState::MissingLosslessDll
-                                                 : VideoCore::FrameGenState::UnsupportedGpu,
-                    std::memory_order_relaxed);
-        return;
+    // The LSFG shaders need float16, null descriptors and the Vulkan memory model. Polaris, Vega
+    // and the other pre-RDNA AMD cards expose no float16, so LSFG can never run there. Rather than
+    // switch frame generation off for good with no explanation, fall back to the built-in FSR3
+    // optical-flow path, which is plain compute and runs on those cards.
+    if (!shaders->IsValid() && !lsfg_fallback_noted) {
+        lsfg_fallback_noted = true;
+        LOG_WARNING(Render_Vulkan,
+                    "LSFG frame generation needs float16, which this GPU does not expose; using the "
+                    "built-in FSR3 frame generation path instead");
     }
 
     if (!frame->storage_view) {
@@ -246,7 +250,9 @@ void FrameGen::Process(const Device& device, Frame* frame, VkFormat format,
     generated = warm && warm_streak >= LSFG_RECURRENCE_FRAMES && plan.generations > 0;
     generated_frames.fetch_add(GeneratedFrameCount(), std::memory_order_relaxed);
 
-    const bool use_fsr3 = Settings::values.frame_gen_type.GetValue() == Settings::FrameGenType::Fsr3;
+    const bool use_fsr3 =
+        Settings::values.frame_gen_type.GetValue() == Settings::FrameGenType::Fsr3 ||
+        !shaders->IsValid();
 
     if (use_fsr3 && fsr3_chain) {
         scheduler.RequestOutsideRenderPassOperationContext();
@@ -272,10 +278,6 @@ void FrameGen::Process(const Device& device, Frame* frame, VkFormat format,
 }
 
 size_t FrameGen::WantedGenerations(size_t capacity) {
-    if (unavailable) {
-        plan = {};
-        return 0;
-    }
     plan = pacer.Plan(capacity);
     return plan.generations;
 }
@@ -285,7 +287,9 @@ size_t FrameGen::GeneratedFrameCount() const {
 }
 
 void FrameGen::GenerateInto(const Device& device, Frame* destination, size_t generation) {
-    const bool use_fsr3 = Settings::values.frame_gen_type.GetValue() == Settings::FrameGenType::Fsr3;
+    const bool use_fsr3 =
+        Settings::values.frame_gen_type.GetValue() == Settings::FrameGenType::Fsr3 ||
+        !shaders->IsValid();
 
     if (use_fsr3 && fsr3_chain) {
         const f32 blend = static_cast<f32>(generation + 1) / static_cast<f32>(last_generations + 1);
@@ -317,7 +321,8 @@ void FrameGen::Rebuild(const Device& device, VkExtent2D extent, VkFormat format,
 
     built_flow_scale = flow_scale;
 
-    if (Settings::values.frame_gen_type.GetValue() == Settings::FrameGenType::Fsr3) {
+    if (Settings::values.frame_gen_type.GetValue() == Settings::FrameGenType::Fsr3 ||
+        !shaders->IsValid()) {
         fsr3_chain.emplace(device, memory_allocator, extent, format);
     } else {
         chain.emplace(device, memory_allocator, *shaders, extent, format, built_flow_scale);

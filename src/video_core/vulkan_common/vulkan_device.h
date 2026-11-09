@@ -1061,6 +1061,17 @@ FN_MAX_LIMIT_LIST
         return has_broken_cube_compatibility;
     }
 
+    /// Returns true on AMD GCN4 and older GPUs.
+    /// True where geometry pipelines must not be built: the driver of AMD GCN4 and older GPUs
+    /// crashes building them. EDEN_NX2_GCN4_GEOMETRY=1 builds them anyway, to test a driver.
+    bool IsAmdGcn4GeometryBlocked() const {
+        return is_amd_gcn4_or_older && !allow_amd_gcn4_geometry;
+    }
+
+    bool IsAmdGcn4OrOlder() const {
+        return is_amd_gcn4_or_older;
+    }
+
     /// Returns true if parallel shader compiling has issues with the current driver.
     bool HasBrokenParallelShaderCompiling() const {
         return has_broken_parallel_compiling;
@@ -1389,7 +1400,9 @@ private:
     bool has_broken_cube_compatibility{};      ///< Has broken cube compatibility bit
     bool host_float16_supported{};             ///< shaderFloat16 for host-only shaders
     bool has_broken_descriptor_aliasing{};     ///< Miscompiles descriptors aliased on one binding
+    bool allow_amd_gcn4_geometry{};
     bool has_broken_parallel_compiling{};      ///< Has broken parallel shader compiling.
+    bool is_amd_gcn4_or_older{};               ///< AMD proprietary driver on GCN4 or older.
     bool has_renderdoc{};                      ///< Has RenderDoc attached
     bool has_nsight_graphics{};                ///< Has Nsight Graphics attached
     bool has_radeon_gpu_profiler{};            ///< Has Radeon GPU Profiler attached.

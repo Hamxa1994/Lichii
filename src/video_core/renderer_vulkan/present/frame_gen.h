@@ -59,7 +59,7 @@ private:
     size_t last_generations{};
     u32 warm_streak{};
     bool generated{};
-    bool unavailable{};
+    bool lsfg_fallback_noted{};
     bool dumped{};
     std::atomic<VideoCore::FrameGenState> state{VideoCore::FrameGenState::Pending};
     std::atomic<u64> generated_frames{};

@@ -167,6 +167,7 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 
 #include "core/tools/renderdoc.h"
 
+#include "common/frame_gen_stats.h"
 #include "core/perf_stats.h"
 
 #include "core/crypto/key_manager.h"
@@ -5098,6 +5099,27 @@ void MainWindow::UpdateStatusBar() {
     }
 
     QString fpsText = tr("Game: %1 FPS").arg(std::round(results.average_game_fps), 0, 'f', 0);
+    if (Settings::values.frame_gen.GetValue()) {
+        // Original and generated frames presented per second since the previous update.
+        static auto last_time = std::chrono::steady_clock::now();
+        static Common::FrameGenStats::Totals last_totals = Common::FrameGenStats::Get();
+        static double original_fps = 0.0;
+        static double generated_fps = 0.0;
+        const auto now = std::chrono::steady_clock::now();
+        const double seconds = std::chrono::duration<double>(now - last_time).count();
+        if (seconds >= 0.5) {
+            const auto totals = Common::FrameGenStats::Get();
+            original_fps = static_cast<double>(totals.original - last_totals.original) / seconds;
+            generated_fps =
+                static_cast<double>(totals.generated - last_totals.generated) / seconds;
+            last_time = now;
+            last_totals = totals;
+        }
+        fpsText = fpsText % tr(" | Frame Gen: %1 original + %2 generated = %3")
+                                .arg(original_fps, 0, 'f', 0)
+                                .arg(generated_fps, 0, 'f', 0)
+                                .arg(original_fps + generated_fps, 0, 'f', 0);
+    }
     if (!m_fpsSuffix.isEmpty())
         fpsText = fpsText % QStringLiteral(" (%1)").arg(m_fpsSuffix);
 

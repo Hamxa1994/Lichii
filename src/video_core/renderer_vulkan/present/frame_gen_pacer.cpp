@@ -101,6 +101,30 @@ FrameGenPlan FrameGenPacer::Plan(size_t capacity) {
                 : measured;
     }
 
+    // Generating is only a win while the rate it actually puts on screen beats the rate this GPU
+    // reached without it. When it does not, the interpolation and composite work cost more time
+    // than the extra frames return, and the picture runs slower than the game alone (the common
+    // case on a 8 GiB Polaris card, where every generated frame is another full-screen composite).
+    // Waiting for the probe window to expire left the game slow for a whole second, so give the
+    // limit back immediately and reuse the probe back-off so it is not re-raised right away.
+    if (previous_generations > 0 && unloaded_base_rate > 0.0f) {
+        const f32 base_rate = 1.0f / smoothed_interval;
+        f32 delivered = base_rate * static_cast<f32>(previous_generations + 1);
+        if (target_rate > 0.0f) {
+            delivered = std::min(delivered, target_rate);
+        }
+        if (delivered < unloaded_base_rate * PROBE_THROUGHPUT_TOLERANCE) {
+            limit = 0;
+            probe_until.reset();
+            deficit_since.reset();
+            probe_failures = std::min(probe_failures + 1, MAX_PROBE_FAILURES);
+            next_probe = now + ProbeBackoff(probe_failures);
+            output_credit = 0.0f;
+            issued_generations = 0;
+            return {};
+        }
+    }
+
     if (stable_until) {
         if (now < *stable_until) {
             return {};

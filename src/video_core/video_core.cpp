@@ -4,7 +4,9 @@
 // SPDX-FileCopyrightText: 2014 Citra Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <functional>
 #include <memory>
+#include <thread>
 
 #include "common/logging.h"
 #include "common/settings.h"
@@ -59,6 +61,14 @@ void CreateGPU(std::optional<Tegra::GPU>& gpu, Core::Frontend::EmuWindow& emu_wi
     VideoCommon::Nx2DownloadTrace::ReadSwitch();
     VideoCore::AsyncReadback::ReadSwitch();
 
+    // Loading the same game can create the renderer once or twice depending on timing. Replacing a
+    // renderer destroys its Vulkan device just before a new one is created, and the AMD driver
+    // aborts the process when a second device is created while the first is still alive, so record
+    // every creation with its thread to tell the two cases apart.
+    LOG_INFO(HW_GPU, "CreateGPU: backend={}, an existing GPU={} on thread {}",
+             Settings::values.renderer_backend.GetValue(), gpu.has_value(),
+             std::hash<std::thread::id>{}(std::this_thread::get_id()));
+
     const auto nvdec_value = Settings::values.nvdec_emulation.GetValue();
     const bool use_nvdec = nvdec_value != Settings::NvdecEmulation::Off;
     const bool use_async = Settings::values.use_asynchronous_gpu_emulation.GetValue();
@@ -68,6 +78,7 @@ void CreateGPU(std::optional<Tegra::GPU>& gpu, Core::Frontend::EmuWindow& emu_wi
     try {
         auto renderer = CreateRenderer(system, emu_window, *gpu, std::move(context));
         gpu->BindRenderer(std::move(renderer));
+        LOG_INFO(HW_GPU, "CreateGPU: renderer created");
     } catch (const std::runtime_error& exception) {
         scope.Cancel();
         LOG_ERROR(HW_GPU, "Failed to initialize GPU: {}", exception.what());

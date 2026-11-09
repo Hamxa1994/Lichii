@@ -1,11 +1,19 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <cstdlib>
+#include <exception>
+#include <filesystem>
+#include <fstream>
+#include <map>
+#include <string>
+
 #include <QApplication>
 
 #include "common/fs/fs_paths.h"
 #include "common/fs/path_util.h"
 #include "nx2_switches.h"
+#include "common/logging.h"
 #include "startup_checks.h"
 
 #if YUZU_ROOM
@@ -30,6 +38,172 @@
 
 #ifdef _WIN32
 #include <QScreen>
+
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+
+#include <cstdarg>
+#include <cstdio>
+#include <cstring>
+
+// This frontend is a GUI program, so a crash prints nowhere, and YUZU_CRASH_DUMPS is off on
+// Windows (CMakeLists.txt: "unimplemented on Windows"): crash_dumps stayed empty while
+// eden_log.txt simply stopped mid-line, with no faulting address to work from. This filter writes
+// the address and stack as module+offset (resolve with the module's PDB) plus a minidump into the
+// profile's crash_dumps directory, so a crash at full speed can be read afterwards. Nothing here
+// allocates or takes a lock: it runs while the process is already broken.
+namespace {
+
+char g_crash_directory[MAX_PATH]{};
+
+void WriteCrashText(HANDLE file, const char* format, ...) {
+    char buffer[1024];
+    va_list args;
+    va_start(args, format);
+    const int length = std::vsnprintf(buffer, sizeof(buffer), format, args);
+    va_end(args);
+    if (length > 0) {
+        const int limit = static_cast<int>(sizeof(buffer)) - 1;
+        DWORD written{};
+        WriteFile(file, buffer, static_cast<DWORD>(length < limit ? length : limit), &written,
+                  nullptr);
+    }
+}
+
+void WriteCrashAddress(HANDLE file, const char* label, const void* address) {
+    HMODULE module{};
+    char name[MAX_PATH] = "?";
+    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                               GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           static_cast<LPCSTR>(address), &module) != 0) {
+        GetModuleFileNameA(module, name, sizeof(name));
+    }
+    WriteCrashText(file, "  %s %p %s+%#llx\n", label, address, name,
+                   static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(address) -
+                                                    reinterpret_cast<uintptr_t>(module)));
+}
+
+LONG WINAPI WriteGuiCrashDump(EXCEPTION_POINTERS* exception) {
+    static LONG entered{};
+    if (InterlockedExchange(&entered, 1) != 0 || g_crash_directory[0] == '\0') {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    // The log file is buffered, so the last lines before the fault (often the ones that show what
+    // the emulator was doing) are still sitting in it. Keep them before doing anything else.
+    Common::Log::FlushFileBackend();
+    const EXCEPTION_RECORD& record = *exception->ExceptionRecord;
+    const DWORD pid = GetCurrentProcessId();
+    char path[MAX_PATH];
+    std::snprintf(path, sizeof(path), "%s\\eden-crash-%lu.txt", g_crash_directory,
+                  static_cast<unsigned long>(pid));
+    const HANDLE text = CreateFileA(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                    FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (text != INVALID_HANDLE_VALUE) {
+        WriteCrashText(text, "Unhandled exception %#lx on thread %lu, information %#llx %#llx\n",
+                       static_cast<unsigned long>(record.ExceptionCode), GetCurrentThreadId(),
+                       static_cast<unsigned long long>(
+                           record.NumberParameters > 0 ? record.ExceptionInformation[0] : 0),
+                       static_cast<unsigned long long>(
+                           record.NumberParameters > 1 ? record.ExceptionInformation[1] : 0));
+        WriteCrashAddress(text, "at", record.ExceptionAddress);
+        void* frames[48];
+        const USHORT count = RtlCaptureStackBackTrace(0, 48, frames, nullptr);
+        for (USHORT i = 0; i < count; ++i) {
+            WriteCrashAddress(text, "frame", frames[i]);
+        }
+        CloseHandle(text);
+    }
+    // The small flag set yuzu_cmd uses: the larger MiniDumpWithIndirectlyReferencedMemory failed
+    // on Eden's address space and left an empty file.
+    struct ExceptionInformation {
+        DWORD thread_id;
+        EXCEPTION_POINTERS* exception_pointers;
+        BOOL client_pointers;
+    };
+    using MiniDumpWriteDumpFn = BOOL(WINAPI*)(HANDLE, DWORD, HANDLE, int,
+                                              const ExceptionInformation*, const void*,
+                                              const void*);
+    const HMODULE dbghelp = LoadLibraryA("dbghelp.dll");
+    const auto write = dbghelp != nullptr
+                           ? reinterpret_cast<MiniDumpWriteDumpFn>(
+                                 GetProcAddress(dbghelp, "MiniDumpWriteDump"))
+                           : nullptr;
+    if (write != nullptr) {
+        std::snprintf(path, sizeof(path), "%s\\eden-crash-%lu.dmp", g_crash_directory,
+                      static_cast<unsigned long>(pid));
+        const HANDLE file = CreateFileA(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                        FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file != INVALID_HANDLE_VALUE) {
+            const ExceptionInformation information{GetCurrentThreadId(), exception, FALSE};
+            write(GetCurrentProcess(), pid, file, 0x1000, &information, nullptr, nullptr);
+            CloseHandle(file);
+        }
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
+// SetUnhandledExceptionFilter never runs for an uncaught C++ exception: that path ends in
+// std::terminate, which calls abort() and skips the SEH filter entirely. The Vulkan wrapper throws
+// on driver errors, so a failed device creation died with no report at all. This records one.
+[[noreturn]] void OnTerminate() {
+    Common::Log::FlushFileBackend();
+    std::string reason = "std::terminate called with no active exception";
+    if (auto current = std::current_exception()) {
+        try {
+            std::rethrow_exception(current);
+        } catch (const std::exception& e) {
+            reason = e.what();
+        } catch (...) {
+            reason = "non-std exception type";
+        }
+    }
+    if (g_crash_directory[0] != '\0') {
+        const DWORD pid = GetCurrentProcessId();
+        char path[MAX_PATH];
+        std::snprintf(path, sizeof(path), "%s\\eden-crash-%lu-terminate.txt", g_crash_directory,
+                      static_cast<unsigned long>(pid));
+        const HANDLE file = CreateFileA(path, GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                        FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file != INVALID_HANDLE_VALUE) {
+            WriteCrashText(file, "Uncaught exception on thread %lu: %s\n", GetCurrentThreadId(),
+                           reason.c_str());
+            void* frames[48];
+            const USHORT count = RtlCaptureStackBackTrace(0, 48, frames, nullptr);
+            for (USHORT i = 0; i < count; ++i) {
+                WriteCrashAddress(file, "frame", frames[i]);
+            }
+            CloseHandle(file);
+        }
+    }
+    std::abort();
+}
+
+// Called once at startup, after nx2_switches.txt is loaded so an EDEN_NX2_CRASH_DUMP set there
+// counts: resolves the directory the handler writes to, so the handler does no path work itself.
+void InstallGuiCrashHandler() {
+    std::string directory;
+    if (const char* environment = std::getenv("EDEN_NX2_CRASH_DUMP")) {
+        directory = environment;
+    } else {
+        directory = Common::FS::PathToUTF8String(
+            Common::FS::GetEdenPath(Common::FS::EdenPath::CrashDumpsDir));
+    }
+    if (directory.empty() || directory.size() >= sizeof(g_crash_directory)) {
+        return;
+    }
+    std::memcpy(g_crash_directory, directory.c_str(), directory.size());
+    g_crash_directory[directory.size()] = '\0';
+    CreateDirectoryA(g_crash_directory, nullptr);
+    SetUnhandledExceptionFilter(WriteGuiCrashDump);
+    std::set_terminate(OnTerminate);
+}
+
+} // Anonymous namespace
 
 static void OverrideWindowsFont() {
     // Qt5 chooses these fonts on Windows and they have fairly ugly alphanumeric/cyrillic characters
@@ -83,6 +257,9 @@ static Qt::HighDpiScaleFactorRoundingPolicy GetHighDpiRoundingPolicy() {
 
 int main(int argc, char* argv[]) {
     LoadNx2Switches(argv[0]);
+#ifdef _WIN32
+    InstallGuiCrashHandler();
+#endif
 #if YUZU_ROOM
     bool launch_room = false;
     for (int i = 1; i < argc; i++) {
