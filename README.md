@@ -65,30 +65,13 @@ The supplied Lichii logo, icon and library artwork are in [dist/branding](dist/b
 
 Lichii is free and stays free. If you want to help, you can donate in crypto. Donations help pay for the AI tools and build machines used to develop this open-source project faster.
 
-**Solana (SOL)**
-```text
-JepEjfyWjGjhJvHSrqj52KtLjcbbbmUh1iGqerYBF4w
-```
-
-**Ethereum (ETH)**
-```text
-0x055ABa1b80Bc35C836Ce7E9F47c2b3d6C75b5534
 ```
 
 **Bitcoin (BTC)**
 ```text
-bc1qcvxdpf4qvdhqp8ee4s355cjmxrzsphsdwpl8w4
+18aN9exea23Bxnnsg2DWtWA9P9ZWvFUBv4
 ```
 
-**BNB Smart Chain (BNB)**
-```text
-0x055ABa1b80Bc35C836Ce7E9F47c2b3d6C75b5534
-```
-
-**Polygon**
-```text
-0x055ABa1b80Bc35C836Ce7E9F47c2b3d6C75b5534
-```
 
 Send each coin on its matching network. Coins sent on the wrong network can't be recovered.
 
