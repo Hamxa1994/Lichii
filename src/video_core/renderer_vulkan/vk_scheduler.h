@@ -454,7 +454,6 @@ private:
 
     const Device& device;
     StateTracker& state_tracker;
-    bool graphics_pipeline_missing{};
 
     std::unique_ptr<MasterSemaphore> master_semaphore;
     FragmentBarrierState fragment_barrier;
