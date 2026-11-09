@@ -64,6 +64,12 @@ buffers 130 to 140 ms, fence 100 to 165 ms, bind stage buffers 55 to 60 ms. `run
 samples those threads to say which functions those stages are.
 
 
+Frames ahead is now the default for Mario Tennis Fever (`nx2_gsv.h`, per title like Ocarina of Time;
+Donkey Kong Bananza still waits). The first present logs `nx2:vi2 frames ahead: on|off|auto`, and
+`EDEN_NX2_FRAMES_AHEAD=0|1` still overrides it for any game. It is not the default for every game
+because the code documents titles that corrupt memory when run ahead (Bananza, Splatoon Raiders,
+Pokopia's glyph atlas).
+
 ## Sampling profile (frames ahead on, `run_lichii_sample.bat`)
 
 | Thread | Share of a core | Where the samples are |

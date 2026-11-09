@@ -1830,12 +1830,25 @@ private:
         constexpr u64 DonkeyKongBananzaProgramId = 0x040074A01BF12000ULL;
         // Ocarina waited ~12 ms a frame on its previous frame's fence here (#161).
         constexpr u64 OcarinaOfTimeProgramId = 0x0400486024DEC000ULL;
+        // Mario Tennis Fever: the game waited ~16 ms of every 26 to 29 ms frame for the GPU to
+        // finish this frame while the GPU was busy 11 ms of it. Running a frame ahead took the
+        // wait to 0 and the frame to 23 to 25 ms on an RX 580, with textures that looked better.
+        constexpr u64 MarioTennisFeverProgramId = 0x0400D4201C6EA000ULL;
         int frames_ahead = frames_ahead_setting;
         const u64 app_program_id = system.GetApplicationProcessProgramID();
         if (frames_ahead == -1 && app_program_id == DonkeyKongBananzaProgramId) {
             frames_ahead = 0;
-        } else if (frames_ahead == -1 && app_program_id == OcarinaOfTimeProgramId) {
+        } else if (frames_ahead == -1 && (app_program_id == OcarinaOfTimeProgramId ||
+                                          app_program_id == MarioTennisFeverProgramId)) {
             frames_ahead = 1;
+        }
+        if (m_presents == 1) {
+            LOG_INFO(Service,
+                     "nx2:vi2 frames ahead: {} for program {:#x} (EDEN_NX2_FRAMES_AHEAD {})",
+                     frames_ahead == 1   ? "on, the game prepares the next frame during this one"
+                     : frames_ahead == 0 ? "off, the game waits for each frame"
+                                         : "auto, it waits for each frame unless a channel is suspended",
+                     app_program_id, frames_ahead_setting == -1 ? "unset" : "set");
         }
         const auto entered = std::chrono::steady_clock::now();
         if (frames_ahead == 1 || (frames_ahead == -1 && !WaitForFrame(~w[22], w[24], true))) {
