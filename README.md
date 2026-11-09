@@ -68,10 +68,11 @@ Lichii is free and stays free. If you want to help, you can donate in crypto. Do
 ```
 
 **Bitcoin (BTC)**
-```text
-18aN9exea23Bxnnsg2DWtWA9P9ZWvFUBv4
-```
 
+18aN9exea23Bxnnsg2DWtWA9P9ZWvFUBv4
+
+
+```
 
 Send each coin on its matching network. Coins sent on the wrong network can't be recovered.
 
